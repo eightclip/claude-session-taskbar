@@ -3,3 +3,4 @@ ClaudeSessionTaskbar.app/
 ClaudeSessionTaskbar
 .swiftpm/
 .DS_Store
+.claude/
