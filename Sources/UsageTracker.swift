@@ -9,8 +9,8 @@ struct TaskbarConfig: Codable {
     var refreshIntervalSeconds: Int
 
     static let `default` = TaskbarConfig(
-        sessionTokenLimit: 500_000,
-        weeklyTokenLimit: 5_000_000,
+        sessionTokenLimit: 5_000_000,
+        weeklyTokenLimit: 45_000_000,
         refreshIntervalSeconds: 10
     )
 
@@ -27,7 +27,8 @@ struct TokenData {
     var cacheRead: Int = 0
     var apiCalls: Int = 0
 
-    var total: Int { input + output + cacheCreate + cacheRead }
+    // Billable tokens only — cache reads are nearly free and inflate the total
+    var total: Int { input + output + cacheCreate }
 
     mutating func add(_ other: TokenData) {
         input       += other.input
@@ -142,7 +143,11 @@ class UsageTracker: ObservableObject {
         if !FileManager.default.fileExists(atPath: path) {
             saveDefaultConfig()
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        NSWorkspace.shared.open(
+            [URL(fileURLWithPath: path)],
+            withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
+            configuration: NSWorkspace.OpenConfiguration()
+        )
     }
 
     // MARK: - Data Refresh
