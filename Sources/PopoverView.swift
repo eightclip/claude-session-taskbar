@@ -9,27 +9,27 @@ struct PopoverView: View {
             headerSection
             sectionDivider
 
-            UsageSection(
-                icon: "bolt.fill",
-                title: "Current Session",
-                tokens: tracker.sessionTokens,
-                limit: tracker.config.sessionTokenLimit,
-                percentage: tracker.sessionPercentage,
-                outputTokens: tracker.sessionOutputTokens,
-                detail: tracker.sessionDetail
-            )
+            if tracker.hasData {
+                UsageSection(
+                    icon: "bolt.fill",
+                    title: "Current Session",
+                    percentage: tracker.sessionPercentage,
+                    resetDate: tracker.sessionResetDate,
+                    status: tracker.sessionStatus
+                )
 
-            sectionDivider
+                sectionDivider
 
-            UsageSection(
-                icon: "calendar",
-                title: "This Week",
-                tokens: tracker.weeklyTokens,
-                limit: tracker.config.weeklyTokenLimit,
-                percentage: tracker.weeklyPercentage,
-                outputTokens: tracker.weeklyOutputTokens,
-                detail: tracker.weeklyDetail
-            )
+                UsageSection(
+                    icon: "calendar",
+                    title: "This Week",
+                    percentage: tracker.weeklyPercentage,
+                    resetDate: tracker.weeklyResetDate,
+                    status: tracker.weeklyStatus
+                )
+            } else {
+                noDataSection
+            }
 
             sectionDivider
             footerSection
@@ -76,15 +76,38 @@ struct PopoverView: View {
         .frame(maxWidth: .infinity)
     }
 
+    // MARK: - No Data
+    private var noDataSection: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "key.fill")
+                .font(.system(size: 24))
+                .foregroundColor(Theme.textSecondary.opacity(0.5))
+
+            Text(tracker.errorMessage ?? "Connecting...")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+
+            if !tracker.isAPIMode {
+                Text("Install & log into Claude Code to enable")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.textSecondary.opacity(0.6))
+            }
+        }
+        .padding(.vertical, 30)
+        .frame(maxWidth: .infinity)
+    }
+
     // MARK: - Footer
     private var footerSection: some View {
         HStack(spacing: 8) {
             // Status indicator
             HStack(spacing: 5) {
                 Circle()
-                    .fill(tracker.hasData ? Color.green : Color.gray)
+                    .fill(tracker.isAPIMode ? Color.green : Color.gray)
                     .frame(width: 5, height: 5)
-                Text(tracker.hasData ? "Updated \(tracker.lastUpdatedText)" : "No data")
+                Text(tracker.isAPIMode ? "Live \u{00B7} \(tracker.lastUpdatedText)" : "Offline")
                     .font(.system(size: 10))
             }
             .foregroundColor(Theme.textSecondary)
@@ -97,7 +120,7 @@ struct PopoverView: View {
                     .font(.system(size: 11))
             }
             .buttonStyle(FooterButtonStyle())
-            .help("Edit limits & settings")
+            .help("Edit settings")
 
             // Refresh button
             Button(action: {
@@ -133,11 +156,9 @@ struct PopoverView: View {
 struct UsageSection: View {
     let icon: String
     let title: String
-    let tokens: Int
-    let limit: Int
     let percentage: Double
-    let outputTokens: Int
-    let detail: String
+    let resetDate: Date?
+    let status: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -163,27 +184,29 @@ struct UsageSection: View {
             GradientProgressBar(progress: percentage)
                 .frame(height: 10)
 
-            // Token details
+            // Reset countdown + status
             HStack(spacing: 0) {
-                Text(Theme.formatTokens(tokens))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textPrimary.opacity(0.9))
-
-                Text(" / \(Theme.formatTokens(limit)) tokens")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textSecondary)
+                if let reset = resetDate {
+                    Image(systemName: "clock")
+                        .font(.system(size: 9))
+                        .foregroundColor(Theme.textSecondary)
+                    Text(" \(Theme.formatCountdown(to: reset))")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Theme.textPrimary.opacity(0.9))
+                }
 
                 Spacer()
 
-                Text(Theme.formatTokens(outputTokens) + " out")
-                    .font(.system(size: 10))
-                    .foregroundColor(Theme.textSecondary.opacity(0.7))
+                // Status badge
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Theme.statusColor(for: status))
+                        .frame(width: 6, height: 6)
+                    Text(Theme.statusLabel(for: status))
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.statusColor(for: status))
+                }
             }
-
-            // Detail line
-            Text(detail)
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textSecondary.opacity(0.7))
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)

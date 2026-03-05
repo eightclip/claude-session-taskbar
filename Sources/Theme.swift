@@ -17,6 +17,7 @@ enum Theme {
     // MARK: - Status Colors
     static let warning  = Color(red: 0.98, green: 0.75, blue: 0.14)   // #FAC024
     static let critical = Color(red: 0.94, green: 0.27, blue: 0.27)   // #EF4545
+    static let success  = Color(red: 0.30, green: 0.78, blue: 0.47)   // #4DC778
 
     // MARK: - NSColor versions (for AppKit drawing)
     static let coralNS    = NSColor(red: 0.91, green: 0.45, blue: 0.35, alpha: 1)
@@ -47,12 +48,39 @@ enum Theme {
         return coral
     }
 
+    // MARK: - Status Helpers
+    static func statusColor(for status: String) -> Color {
+        switch status.lowercased() {
+        case "allowed":          return success
+        case "allowed_warning":  return warning
+        case "rejected":         return critical
+        default:                 return textSecondary
+        }
+    }
+
+    static func statusLabel(for status: String) -> String {
+        switch status.lowercased() {
+        case "allowed":          return "Allowed"
+        case "allowed_warning":  return "Warning"
+        case "rejected":         return "Rate Limited"
+        default:                 return "Unknown"
+        }
+    }
+
     // MARK: - Formatting Helpers
-    static func formatTokens(_ count: Int) -> String {
-        if count >= 1_000_000_000 { return String(format: "%.1fB", Double(count) / 1_000_000_000) }
-        if count >= 1_000_000     { return String(format: "%.1fM", Double(count) / 1_000_000) }
-        if count >= 1_000         { return String(format: "%.1fK", Double(count) / 1_000) }
-        return "\(count)"
+    static func formatCountdown(to date: Date) -> String {
+        let seconds = Int(date.timeIntervalSinceNow)
+        if seconds <= 0 { return "now" }
+        let hours = seconds / 3600
+        let mins = (seconds % 3600) / 60
+        if hours > 24 {
+            let days = hours / 24
+            return "in \(days)d \(hours % 24)h"
+        }
+        if hours > 0 {
+            return mins > 0 ? "in \(hours)h \(mins)m" : "in \(hours)h"
+        }
+        return "in \(mins)m"
     }
 
     static func formatDuration(from start: Date, to end: Date = Date()) -> String {

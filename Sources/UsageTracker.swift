@@ -1,17 +1,14 @@
 import Foundation
 import Combine
 import Cocoa
+import Security
 
 // MARK: - Configuration
 struct TaskbarConfig: Codable {
-    var sessionTokenLimit: Int
-    var weeklyTokenLimit: Int
     var refreshIntervalSeconds: Int
 
     static let `default` = TaskbarConfig(
-        sessionTokenLimit: 5_000_000,
-        weeklyTokenLimit: 45_000_000,
-        refreshIntervalSeconds: 10
+        refreshIntervalSeconds: 60
     )
 
     static var configPath: String {
@@ -19,100 +16,30 @@ struct TaskbarConfig: Codable {
     }
 }
 
-// MARK: - Token Data
-struct TokenData {
-    var input: Int = 0
-    var output: Int = 0
-    var cacheCreate: Int = 0
-    var cacheRead: Int = 0
-    var apiCalls: Int = 0
-
-    // Billable tokens only — cache reads are nearly free and inflate the total
-    var total: Int { input + output + cacheCreate }
-
-    mutating func add(_ other: TokenData) {
-        input       += other.input
-        output      += other.output
-        cacheCreate += other.cacheCreate
-        cacheRead   += other.cacheRead
-        apiCalls    += other.apiCalls
-    }
-}
-
-// MARK: - File Tracking State
-private struct FileState {
-    var offset: UInt64 = 0
-    var data: TokenData = TokenData()
-    var modDate: Date = .distantPast
-    var fileSize: UInt64 = 0
-}
-
-// MARK: - Session Info
-struct SessionInfo {
-    var filePath: String
-    var tokens: TokenData
-    var modDate: Date
-    var projectDir: String
-}
-
 // MARK: - Usage Tracker
 class UsageTracker: ObservableObject {
-    // Published session data
-    @Published var sessionTokens: Int = 0
-    @Published var sessionOutputTokens: Int = 0
-    @Published var sessionApiCalls: Int = 0
-    @Published var sessionStartTime: Date?
-    @Published var currentSessionId: String = ""
-
-    // Published weekly data
-    @Published var weeklyTokens: Int = 0
-    @Published var weeklyOutputTokens: Int = 0
-    @Published var weeklyApiCalls: Int = 0
-    @Published var weeklySessions: Int = 0
+    // Published API data
+    @Published var sessionPercentage: Double = 0
+    @Published var weeklyPercentage: Double = 0
+    @Published var sessionResetDate: Date?
+    @Published var weeklyResetDate: Date?
+    @Published var sessionStatus: String = "unknown"
+    @Published var weeklyStatus: String = "unknown"
 
     // Published meta
     @Published var lastUpdated: Date = Date()
     @Published var hasData: Bool = false
+    @Published var isAPIMode: Bool = false
+    @Published var errorMessage: String?
 
     // Config
     var config: TaskbarConfig = .default
 
-    // Internal state
-    private var fileStates: [String: FileState] = [:]
-    private let claudeDir: String
-
-    // MARK: - Computed Properties
-    var sessionPercentage: Double {
-        guard config.sessionTokenLimit > 0 else { return 0 }
-        return Double(sessionTokens) / Double(config.sessionTokenLimit)
-    }
-
-    var weeklyPercentage: Double {
-        guard config.weeklyTokenLimit > 0 else { return 0 }
-        return Double(weeklyTokens) / Double(config.weeklyTokenLimit)
-    }
-
-    var sessionDetail: String {
-        guard sessionStartTime != nil else { return "No active session" }
-        let duration = Theme.formatDuration(from: sessionStartTime!, to: Date())
-        return "\(sessionApiCalls) calls \u{00B7} \(duration)"
-    }
-
-    var weeklyDetail: String {
-        let cal = Calendar.current
-        let weekday = cal.component(.weekday, from: Date())
-        let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        let today = dayNames[weekday - 1]
-        return "\(weeklySessions) sessions \u{00B7} Through \(today)"
-    }
-
-    var lastUpdatedText: String {
-        Theme.formatTimeAgo(lastUpdated)
-    }
+    // Internal
+    private var cachedToken: String?
 
     // MARK: - Initialization
     init() {
-        claudeDir = NSString(string: "~/.claude").expandingTildeInPath
         loadConfig()
         refresh()
     }
@@ -150,192 +77,194 @@ class UsageTracker: ObservableObject {
         )
     }
 
-    // MARK: - Data Refresh
+    // MARK: - OAuth Token Retrieval
+
+    /// Read OAuth token from macOS Keychain (where Claude Code stores it)
+    private func getTokenFromKeychain() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let jsonString = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        // Parse JSON: {"claudeAiOauth":{"accessToken":"sk-ant-oat01-..."}}
+        guard let jsonData = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else {
+            return nil
+        }
+
+        return token
+    }
+
+    /// Get OAuth token from env var (when launched from Claude Code)
+    private func getTokenFromEnv() -> String? {
+        let token = ProcessInfo.processInfo.environment["CLAUDE_CODE_OAUTH_TOKEN"]
+        if let t = token, !t.isEmpty { return t }
+        return nil
+    }
+
+    /// Get token with caching — tries Keychain first, then env var
+    private func getToken() -> String? {
+        if let cached = cachedToken { return cached }
+
+        if let token = getTokenFromKeychain() {
+            cachedToken = token
+            return token
+        }
+
+        if let token = getTokenFromEnv() {
+            cachedToken = token
+            return token
+        }
+
+        return nil
+    }
+
+    // MARK: - API-Based Refresh
     func refresh() {
         loadConfig()
 
-        let projectsDir = claudeDir + "/projects"
-        guard FileManager.default.fileExists(atPath: projectsDir) else {
-            hasData = false
+        guard let token = getToken() else {
+            DispatchQueue.main.async {
+                self.isAPIMode = false
+                self.hasData = false
+                self.errorMessage = "No Claude Code credentials found in Keychain"
+            }
             return
         }
 
-        // Find all project directories
-        guard let projectDirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) else { return }
+        fetchUsageFromAPI(token: token)
+    }
 
-        var allSessions: [SessionInfo] = []
+    private func fetchUsageFromAPI(token: String) {
+        let url = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(token, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
 
-        for projDir in projectDirs {
-            let projPath = projectsDir + "/" + projDir
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: projPath, isDirectory: &isDir), isDir.boolValue else { continue }
+        // Minimal request — cheapest possible (Haiku, 1 token)
+        let body: [String: Any] = [
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [["role": "user", "content": "x"]]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-            // Find all JSONL files in this project directory
-            guard let files = try? FileManager.default.contentsOfDirectory(atPath: projPath) else { continue }
-            for file in files where file.hasSuffix(".jsonl") {
-                let filePath = projPath + "/" + file
-                let tokens = parseFile(at: filePath)
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-                      let modDate = attrs[.modificationDate] as? Date else { continue }
+        let task = URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
 
-                allSessions.append(SessionInfo(
-                    filePath: filePath,
-                    tokens: tokens,
-                    modDate: modDate,
-                    projectDir: projDir
-                ))
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.errorMessage = "API error: \(error.localizedDescription)"
+                    self.hasData = false
+                }
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                DispatchQueue.main.async {
+                    self.errorMessage = "Invalid API response"
+                    self.hasData = false
+                }
+                return
+            }
+
+            // Check for auth errors
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                DispatchQueue.main.async {
+                    self.cachedToken = nil // Force re-read on next refresh
+                    self.errorMessage = "Token expired — restart Claude Code"
+                    self.isAPIMode = false
+                    self.hasData = false
+                }
+                return
+            }
+
+            // Parse rate limit headers
+            let headers = httpResponse.allHeaderFields
+
+            let sessionUtil = self.parseDoubleHeader(headers, key: "anthropic-ratelimit-unified-5h-utilization")
+            let weeklyUtil = self.parseDoubleHeader(headers, key: "anthropic-ratelimit-unified-7d-utilization")
+            let sessionReset = self.parseTimestampHeader(headers, key: "anthropic-ratelimit-unified-5h-reset")
+            let weeklyReset = self.parseTimestampHeader(headers, key: "anthropic-ratelimit-unified-7d-reset")
+            let sessionStat = self.parseStringHeader(headers, key: "anthropic-ratelimit-unified-5h-status")
+            let weeklyStat = self.parseStringHeader(headers, key: "anthropic-ratelimit-unified-7d-status")
+
+            DispatchQueue.main.async {
+                self.sessionPercentage = sessionUtil ?? 0
+                self.weeklyPercentage = weeklyUtil ?? 0
+                self.sessionResetDate = sessionReset
+                self.weeklyResetDate = weeklyReset
+                self.sessionStatus = sessionStat ?? "unknown"
+                self.weeklyStatus = weeklyStat ?? "unknown"
+                self.isAPIMode = true
+                self.hasData = true
+                self.errorMessage = nil
+                self.lastUpdated = Date()
             }
         }
+        task.resume()
+    }
 
-        guard !allSessions.isEmpty else {
-            hasData = false
-            return
-        }
-
-        hasData = true
-
-        // Current session = most recently modified
-        let sorted = allSessions.sorted { $0.modDate > $1.modDate }
-        if let current = sorted.first {
-            sessionTokens = current.tokens.total
-            sessionOutputTokens = current.tokens.output
-            sessionApiCalls = current.tokens.apiCalls
-            currentSessionId = String(URL(fileURLWithPath: current.filePath).deletingPathExtension().lastPathComponent.prefix(8))
-
-            // Estimate session start from file creation
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: current.filePath),
-               let created = attrs[.creationDate] as? Date {
-                sessionStartTime = created
+    // MARK: - Header Parsing
+    private func parseDoubleHeader(_ headers: [AnyHashable: Any], key: String) -> Double? {
+        // Case-insensitive header lookup
+        for (k, v) in headers {
+            if let headerKey = k as? String, headerKey.lowercased() == key.lowercased() {
+                if let str = v as? String { return Double(str) }
+                if let num = v as? Double { return num }
             }
         }
-
-        // Weekly = all sessions from last 7 days
-        let sevenDaysAgo = Date().addingTimeInterval(-7 * 24 * 3600)
-        let weeklySessions = sorted.filter { $0.modDate >= sevenDaysAgo }
-
-        var weeklyTotal = TokenData()
-        for session in weeklySessions {
-            weeklyTotal.add(session.tokens)
-        }
-
-        weeklyTokens = weeklyTotal.total
-        weeklyOutputTokens = weeklyTotal.output
-        weeklyApiCalls = weeklyTotal.apiCalls
-        self.weeklySessions = weeklySessions.count
-
-        lastUpdated = Date()
+        return nil
     }
 
-    // MARK: - File Parsing
-    private func parseFile(at path: String) -> TokenData {
-        // Check if file has changed since last parse
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let modDate = attrs[.modificationDate] as? Date,
-              let fileSize = attrs[.size] as? UInt64 else {
-            return fileStates[path]?.data ?? TokenData()
-        }
-
-        if let existing = fileStates[path] {
-            if existing.fileSize == fileSize && existing.modDate == modDate {
-                return existing.data // File unchanged, return cached
-            }
-            // File changed, read from last offset
-            return parseFileIncremental(at: path, from: existing)
-        }
-
-        // First time reading this file
-        return parseFileFull(at: path, fileSize: fileSize, modDate: modDate)
-    }
-
-    private func parseFileFull(at path: String, fileSize: UInt64, modDate: Date) -> TokenData {
-        guard let handle = FileHandle(forReadingAtPath: path) else {
-            return TokenData()
-        }
-        defer { handle.closeFile() }
-
-        var tokens = TokenData()
-        let data = handle.readDataToEndOfFile()
-        let newOffset = handle.offsetInFile
-
-        if let text = String(data: data, encoding: .utf8) {
-            tokens = extractTokens(from: text)
-        }
-
-        fileStates[path] = FileState(
-            offset: newOffset,
-            data: tokens,
-            modDate: modDate,
-            fileSize: fileSize
-        )
-
-        return tokens
-    }
-
-    private func parseFileIncremental(at path: String, from state: FileState) -> TokenData {
-        guard let handle = FileHandle(forReadingAtPath: path) else {
-            return state.data
-        }
-        defer { handle.closeFile() }
-
-        handle.seek(toFileOffset: state.offset)
-        let newData = handle.readDataToEndOfFile()
-        let newOffset = handle.offsetInFile
-
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let modDate = attrs[.modificationDate] as? Date,
-              let fileSize = attrs[.size] as? UInt64 else {
-            return state.data
-        }
-
-        var tokens = state.data
-        if let text = String(data: newData, encoding: .utf8) {
-            let newTokens = extractTokens(from: text)
-            tokens.add(newTokens)
-        }
-
-        fileStates[path] = FileState(
-            offset: newOffset,
-            data: tokens,
-            modDate: modDate,
-            fileSize: fileSize
-        )
-
-        return tokens
-    }
-
-    // MARK: - Token Extraction
-    private func extractTokens(from text: String) -> TokenData {
-        var tokens = TokenData()
-
-        for line in text.components(separatedBy: "\n") {
-            // Only process lines that contain output_tokens (complete API responses)
-            guard line.contains("\"output_tokens\"") else { continue }
-
-            let input       = extractInt(from: line, key: "\"input_tokens\":")
-            let output      = extractInt(from: line, key: "\"output_tokens\":")
-            let cacheCreate = extractInt(from: line, key: "\"cache_creation_input_tokens\":")
-            let cacheRead   = extractInt(from: line, key: "\"cache_read_input_tokens\":")
-
-            if let out = output, out > 0 {
-                tokens.input       += input ?? 0
-                tokens.output      += out
-                tokens.cacheCreate += cacheCreate ?? 0
-                tokens.cacheRead   += cacheRead ?? 0
-                tokens.apiCalls    += 1
+    private func parseTimestampHeader(_ headers: [AnyHashable: Any], key: String) -> Date? {
+        for (k, v) in headers {
+            if let headerKey = k as? String, headerKey.lowercased() == key.lowercased() {
+                if let str = v as? String, let ts = TimeInterval(str) {
+                    return Date(timeIntervalSince1970: ts)
+                }
             }
         }
-
-        return tokens
+        return nil
     }
 
-    private func extractInt(from string: String, key: String) -> Int? {
-        guard let keyRange = string.range(of: key) else { return nil }
-        let start = keyRange.upperBound
-        var end = start
-        while end < string.endIndex && string[end].isNumber {
-            end = string.index(after: end)
+    private func parseStringHeader(_ headers: [AnyHashable: Any], key: String) -> String? {
+        for (k, v) in headers {
+            if let headerKey = k as? String, headerKey.lowercased() == key.lowercased() {
+                return v as? String
+            }
         }
-        guard start < end else { return nil }
-        return Int(string[start..<end])
+        return nil
+    }
+
+    // MARK: - Display Helpers
+    var sessionDetail: String {
+        guard let reset = sessionResetDate else { return "No data" }
+        return "Resets \(Theme.formatCountdown(to: reset))"
+    }
+
+    var weeklyDetail: String {
+        guard let reset = weeklyResetDate else { return "No data" }
+        return "Resets \(Theme.formatCountdown(to: reset))"
+    }
+
+    var lastUpdatedText: String {
+        Theme.formatTimeAgo(lastUpdated)
     }
 }

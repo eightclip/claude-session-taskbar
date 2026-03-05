@@ -139,9 +139,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Update Timer
     private func startUpdateTimer() {
-        updateTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(usageTracker.config.refreshIntervalSeconds), repeats: true) { [weak self] _ in
+        let interval = TimeInterval(usageTracker.config.refreshIntervalSeconds)
+        updateTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.usageTracker.refresh()
-            self?.updateStatusBarImage()
+            // Delay image update slightly to let async API response arrive
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self?.updateStatusBarImage()
+            }
         }
     }
 

@@ -22,6 +22,7 @@ swiftc \
   -swift-version 5 \
   -sdk "$SDK" \
   -target arm64-apple-macosx13.0 \
+  -framework Security \
   Sources/Theme.swift \
   Sources/UsageTracker.swift \
   Sources/PopoverView.swift \
