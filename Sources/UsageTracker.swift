@@ -115,10 +115,9 @@ class UsageTracker: ObservableObject {
         return nil
     }
 
-    /// Get token with caching — tries Keychain first, then env var
+    /// Get token — always re-reads from Keychain (token can be refreshed externally)
     private func getToken() -> String? {
-        if let cached = cachedToken { return cached }
-
+        // Always try Keychain first (Claude Code may have refreshed the token)
         if let token = getTokenFromKeychain() {
             cachedToken = token
             return token
@@ -129,6 +128,7 @@ class UsageTracker: ObservableObject {
             return token
         }
 
+        cachedToken = nil
         return nil
     }
 
